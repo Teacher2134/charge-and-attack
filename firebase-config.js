@@ -1,8 +1,10 @@
-// Firebase コンソールの「プロジェクトの設定 > マイアプリ > ウェブアプリ」に表示される設定に置き換えてください。
 export const firebaseConfig = {
-  apiKey: "REPLACE_ME",
-  authDomain: "REPLACE_ME.firebaseapp.com",
-  databaseURL: "https://REPLACE_ME-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "REPLACE_ME",
-  appId: "REPLACE_ME"
+  apiKey: "AIzaSyAyL-Yx3qQ1rL2-jvriMJ4yVy9vLTBhAwY",
+  authDomain: "charge-and-attack.firebaseapp.com",
+  databaseURL: "https://charge-and-attack-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "charge-and-attack",
+  storageBucket: "charge-and-attack.firebasestorage.app",
+  messagingSenderId: "563077167401",
+  appId: "1:563077167401:web:4b2ab4543268a4588d9f38",
+  measurementId: "G-CC0XE682BS"
 };
