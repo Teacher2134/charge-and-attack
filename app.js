@@ -33,16 +33,14 @@ async function joinRoom(code){
   if(current.players?.p2 && current.players.p1!==uid && current.players.p2!==uid){
     error('このルームはすでに2人参加しています。');return;
   }
-  const result=await runTransaction(target,r=>{
-    // If the participant is already in this room, joining is idempotent.
-    if(!r||!r.players)return;
-    if(r.players.p1===uid||r.players.p2===uid)return r;
-    if(r.players.p2)return;
-    r.players.p2=uid;
-    return r;
-  },{applyLocally:false});
+  // Join only the empty second-player slot. A transaction on the whole
+  // room can abort on a transient uncached null room value.
+  const result=await runTransaction(ref(db,'rooms/'+code+'/players/p2'),
+    existing => existing===null || existing===uid ? uid : undefined,
+    {applyLocally:false}
+  );
   if(!result.committed){
-    error('ルームに参加できませんでした。満員になっていないか確認してください。');return;
+    error('2人目の登録ができませんでした。すでに満員の可能性があります。');return;
   }
   startRoom(code);
 }
