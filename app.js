@@ -1,0 +1,60 @@
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
+import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
+import { getDatabase, ref, get, onValue, runTransaction } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-database.js';
+import { firebaseConfig } from './firebase-config.js';
+
+const $=id=>document.getElementById(id), moves={charge:'⚡ チャージ',attack:'💥 ハー',barrier:'🛡️ バリア',mirror:'🪞 ミラー'};
+let db, uid, roomId, slot, room, off, pending=null, busy=false, lastAutoReveal='', isConfigured=firebaseConfig.apiKey!=='REPLACE_ME';
+const error=e=>{ $('error').textContent=typeof e==='string'?e:(e?.message||String(e)); $('error').classList.remove('hidden'); console.error(e); };
+const clearError=()=>{$('error').classList.add('hidden');};
+const currentRef=()=>ref(db,'rooms/'+roomId);
+const need=m=>({charge:0,attack:1,barrier:0,mirror:3})[m];
+const randomCode=()=>{const letters='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';return Array.from(crypto.getRandomValues(new Uint8Array(6)),n=>letters[n%letters.length]).join('');};
+const digest=async(s)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s))),x=>x.toString(16).padStart(2,'0')).join('');
+const clone=x=>JSON.parse(JSON.stringify(x));
+const startRoom=id=>{if(off)off();roomId=id;pending=null;lastAutoReveal='';history.replaceState({},'',`?room=${id}`);$('lobby').classList.add('hidden');$('lobbyFooter').classList.add('hidden');$('game').classList.remove('hidden');$('roomCode').textContent=id;off=onValue(currentRef(),snap=>{room=snap.val();if(!room){error('このルームは存在しません。');return;}slot=room.players?.p1===uid?'p1':room.players?.p2===uid?'p2':null;if(!slot){error('このルームは満員です。');return;}render();autoReveal().catch(error);},error);};
+async function createRoom(){clearError();const code=randomCode();const result=await runTransaction(ref(db,'rooms/'+code),r=>r===null?{players:{p1:uid},round:1,charges:{p1:0,p2:0},phase:'choose',history:{}}:undefined,{applyLocally:false});if(!result.committed)return createRoom();startRoom(code);}
+async function joinRoom(code){
+  clearError();
+  code=code.trim().toUpperCase();
+  if(!/^[A-HJ-NP-Z2-9]{6}$/.test(code)){
+    error('合言葉は6文字の英数字です。');return;
+  }
+  const target=ref(db,'rooms/'+code);
+  // A transaction can receive an initial null value even when a remote room
+  // exists. Read the actual room first to avoid wrongly aborting the join.
+  let snapshot;
+  try { snapshot=await get(target); }
+  catch(e){ error('ルーム情報を取得できませんでした：'+(e?.message||String(e))); return; }
+  if(!snapshot.exists()){
+    error('ルームが見つかりません。1人目のルーム番号を確認してください。');return;
+  }
+  const current=snapshot.val();
+  if(current.players?.p2 && current.players.p1!==uid && current.players.p2!==uid){
+    error('このルームはすでに2人参加しています。');return;
+  }
+  const result=await runTransaction(target,r=>{
+    // If the participant is already in this room, joining is idempotent.
+    if(!r||!r.players)return;
+    if(r.players.p1===uid||r.players.p2===uid)return r;
+    if(r.players.p2)return;
+    r.players.p2=uid;
+    return r;
+  },{applyLocally:false});
+  if(!result.committed){
+    error('ルームに参加できませんでした。満員になっていないか確認してください。');return;
+  }
+  startRoom(code);
+}
+async function commitMove(move){if(busy||!room||room.phase!=='choose'||room.charges[slot]<need(move)||room.commits?.[slot]||!room.players.p2)return;busy=true;clearError();try{const nonce=Array.from(crypto.getRandomValues(new Uint8Array(24)),v=>v.toString(16).padStart(2,'0')).join('');const hash=await digest(`${roomId}:${room.round}:${slot}:${move}:${nonce}`);const result=await runTransaction(currentRef(),r=>{if(!r||r.phase!=='choose'||r.commits?.[slot]||r.charges[slot]<need(move)||!r.players.p2)return; r.commits??={};r.commits[slot]=hash;if(r.commits.p1&&r.commits.p2)r.phase='reveal';return r;},{applyLocally:false});if(result.committed){pending={round:room.round,move,nonce};sessionStorage.setItem('pending-'+roomId,JSON.stringify(pending));await autoReveal();}else error('選択できませんでした。画面を確認してください。');}catch(e){error(e);}finally{busy=false;render();}}
+async function autoReveal(){if(!room||!slot||room.phase!=='reveal'||room.reveals?.[slot])return;const record=pending||JSON.parse(sessionStorage.getItem('pending-'+roomId)||'null');if(!record||record.round!==room.round){error('選択データがありません。この端末でルームを開き直すと続行できない場合があります。');return;}const key=room.round+':'+slot;if(lastAutoReveal===key)return;lastAutoReveal=key;const expected=await digest(`${roomId}:${room.round}:${slot}:${record.move}:${record.nonce}`);if(expected!==room.commits[slot]){error('選択データを検証できません。');return;}try{await runTransaction(currentRef(),r=>{if(!r||r.phase!=='reveal'||!r.commits?.[slot])return;if(r.reveals?.[slot])return;r.reveals??={};r.reveals[slot]={move:record.move,nonce:record.nonce};return r;},{applyLocally:false});await settle();}catch(e){lastAutoReveal='';error(e);}}
+function outcome(a,b){const aWin=(a==='attack'&&b==='charge')||(a==='mirror'&&b==='attack');const bWin=(b==='attack'&&a==='charge')||(b==='mirror'&&a==='attack');return aWin&&bWin?'draw':aWin?'p1':bWin?'p2':null;}
+async function settle(){await runTransaction(currentRef(),r=>{if(!r||r.phase!=='reveal'||!r.reveals?.p1||!r.reveals?.p2)return;const rev=r.reveals;for(const s of ['p1','p2']){const {move,nonce}=rev[s];if(!moves[move]||!nonce)return;}const a=rev.p1.move,b=rev.p2.move;const winner=outcome(a,b);r.charges.p1+=a==='charge'?1:a==='attack'?-1:a==='mirror'?-3:0;r.charges.p2+=b==='charge'?1:b==='attack'?-1:b==='mirror'?-3:0;r.history??={};r.history[r.round]={p1:a,p2:b,winner};r.phase=winner?'finished':'result';r.winner=winner||null;delete r.commits;delete r.reveals;return r;},{applyLocally:false});}
+async function nextRound(){clearError();await runTransaction(currentRef(),r=>{if(!r||r.phase!=='result')return;r.round++;r.phase='choose';delete r.winner;return r;},{applyLocally:false});pending=null;sessionStorage.removeItem('pending-'+roomId);lastAutoReveal='';}
+async function rematch(){clearError();await runTransaction(currentRef(),r=>{if(!r||r.phase!=='finished')return;r.phase='choose';r.round=1;r.charges={p1:0,p2:0};r.history={};delete r.winner;delete r.commits;delete r.reveals;return r;},{applyLocally:false});pending=null;sessionStorage.removeItem('pending-'+roomId);lastAutoReveal='';}
+function render(){if(!room||!slot)return;const other=slot==='p1'?'p2':'p1',ready=!!room.players.p2;const mine=room.commits?.[slot],theirs=room.commits?.[other];$('myCharge').textContent=room.charges[slot];$('theirCharge').textContent=room.charges[other];$('round').textContent='第'+room.round+'ターン';$('myReady').textContent=mine?'✅ 選択済み':'未選択';$('theirReady').textContent=!ready?'参加待ち':theirs?'✅ 選択済み':'考え中';let status='コマンドを選んでね！';if(!ready)status='友達の参加を待っています。招待URLを送ろう！';else if(room.phase==='choose'&&mine)status='選択完了！友達の選択待ち…';else if(room.phase==='reveal')status='両者のコマンドを確認中…';else if(room.phase==='result')status='今回のターンは決着なし！次へ進もう。';else if(room.phase==='finished')status=room.winner===slot?'🎉 あなたの勝ち！':'💥 友達の勝ち！';$('status').textContent=status;
+$('commands').classList.toggle('hidden',room.phase!=='choose');$('continue').classList.toggle('hidden',!['result','finished'].includes(room.phase));$('next').textContent=room.phase==='finished'?'もう一戦':'次のターンへ';document.querySelectorAll('[data-move]').forEach(b=>{const lacking=room.charges[slot]<need(b.dataset.move);b.disabled=!ready||!!mine||busy||lacking;b.classList.toggle('locked',lacking);});const past=room.history||{};const turns=Object.keys(past).sort((a,b)=>Number(b)-Number(a));$('history').innerHTML=turns.length?turns.slice(0,12).map(n=>{const x=past[n];return `<div class="pill" style="margin:5px 0">${Number(n)}ターン：あなた ${moves[x[slot]]} ／ 友達 ${moves[x[other]]}${x.winner?' 🏆':''}</div>`;}).join(''):'まだ対戦していません。';const recent=past[room.round];$('result').textContent=recent?`${moves[recent[slot]]} VS ${moves[recent[other]]}`:'';
+if(room.phase==='reveal'&&room.reveals?.p1&&room.reveals?.p2)settle().catch(error);
+}
+$('create').onclick=()=>createRoom().catch(error);$('join').onclick=()=>joinRoom($('roomInput').value).catch(error);$('roomInput').onkeydown=e=>{if(e.key==='Enter')$('join').click();};document.querySelectorAll('[data-move]').forEach(b=>b.onclick=()=>commitMove(b.dataset.move));$('next').onclick=()=>{(room.phase==='finished'?rematch():nextRound()).catch(error);};$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(location.href);$('copy').textContent='✅ コピーしたよ！';setTimeout(()=>$('copy').textContent='招待URLをコピー',1500);}catch(e){error('URLをコピーできませんでした。ブラウザの共有機能を使ってください。');}};$('leave').onclick=()=>{if(off)off();room=null;roomId=null;history.replaceState({},'',location.pathname);$('game').classList.add('hidden');$('lobby').classList.remove('hidden');$('lobbyFooter').classList.remove('hidden');clearError();};
+(async()=>{if(!isConfigured){error('公開前の設定が必要です。firebase-config.js に Firebase の設定を入力してください。');$('create').disabled=true;$('join').disabled=true;return;}try{const app=initializeApp(firebaseConfig);db=getDatabase(app);const auth=getAuth(app);const user=await signInAnonymously(auth);uid=user.user.uid;const param=new URLSearchParams(location.search).get('room');if(param)await joinRoom(param);}catch(e){error(e);}})();
